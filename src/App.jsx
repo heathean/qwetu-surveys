@@ -1018,7 +1018,7 @@ function ListingCard({ listing, rightAction, rotateSeed, distance, onReport, isF
     const key = `qwetu_viewed_${listing.id}`;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
-    supabase.rpc("increment_view_count", { p_listing_id: listing.id }).catch(() => {});
+    supabase.rpc("increment_view_count", { p_listing_id: listing.id }).then(() => {}).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackView, listing.id]);
 
