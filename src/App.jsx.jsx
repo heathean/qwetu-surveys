@@ -149,6 +149,13 @@ function uid() {
   return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+function minutesAgo(iso) {
+  const mins = Math.max(0, Math.round((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 1) return "just now";
+  if (mins === 1) return "1 min ago";
+  return `${mins} min ago`;
+}
+
 // --- distance helper (haversine, returns km) ---
 function distanceKm(lat1, lon1, lat2, lon2) {
   if ([lat1, lon1, lat2, lon2].some((v) => v === null || v === undefined || Number.isNaN(Number(v)))) {
@@ -1514,8 +1521,35 @@ export default function App() {
     listingsRef.current = listings;
   }, [listings]);
 
-  // Pop a notification on the landlord's dashboard the moment a hunter
-  // expresses interest in one of their own rooms.
+  // Load interests from the last hour on sign-in, so the notification
+  // list survives page refreshes — not just live pushes while watching.
+  useEffect(() => {
+    if (!user) {
+      setInterestNotifications([]);
+      return;
+    }
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    supabase
+      .from("interests")
+      .select("id, hunter_name, created_at, listings!inner(building_name, room_label, landlord_id)")
+      .eq("listings.landlord_id", user.id)
+      .gte("created_at", oneHourAgo)
+      .order("created_at", { ascending: false })
+      .then(({ data }) => {
+        setInterestNotifications(
+          (data || []).map((row) => ({
+            id: row.id,
+            hunterName: row.hunter_name,
+            roomLabel: row.listings.room_label,
+            buildingName: row.listings.building_name,
+            createdAt: row.created_at,
+          }))
+        );
+      });
+  }, [user]);
+
+  // Push new ones the moment they happen, and quietly drop any that have
+  // aged past an hour so the list doesn't grow forever.
   useEffect(() => {
     if (!user) return;
     const channel = supabase
@@ -1524,19 +1558,28 @@ export default function App() {
         const row = payload.new;
         const listing = listingsRef.current.find((l) => l.id === row.listing_id);
         if (listing && listing.landlord_id === user.id) {
-          const noteId = uid();
           setInterestNotifications((prev) => [
+            {
+              id: row.id,
+              hunterName: row.hunter_name,
+              roomLabel: listing.room_label,
+              buildingName: listing.building_name,
+              createdAt: row.created_at,
+            },
             ...prev,
-            { id: noteId, hunterName: row.hunter_name, roomLabel: listing.room_label, buildingName: listing.building_name },
           ]);
-          setTimeout(() => {
-            setInterestNotifications((prev) => prev.filter((n) => n.id !== noteId));
-          }, 8000);
         }
       })
       .subscribe();
+
+    const expiryTimer = setInterval(() => {
+      const cutoff = Date.now() - 60 * 60 * 1000;
+      setInterestNotifications((prev) => prev.filter((n) => new Date(n.createdAt).getTime() > cutoff));
+    }, 60 * 1000);
+
     return () => {
       supabase.removeChannel(channel);
+      clearInterval(expiryTimer);
     };
   }, [user]);
 
@@ -2350,6 +2393,9 @@ export default function App() {
           <div>
             {interestNotifications.length > 0 ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.gray, display: "flex", alignItems: "center", gap: 4 }}>
+                  <Bell size={13} /> Recent interest (last hour)
+                </div>
                 {interestNotifications.map((n) => (
                   <div
                     key={n.id}
@@ -2369,6 +2415,7 @@ export default function App() {
                     <Bell size={16} />
                     <span>
                       {n.hunterName} is interested in your {n.roomLabel} at {n.buildingName}!
+                      <span style={{ fontWeight: 600, opacity: 0.75, marginLeft: 6 }}>{minutesAgo(n.createdAt)}</span>
                     </span>
                     <button
                       onClick={() => setInterestNotifications((prev) => prev.filter((x) => x.id !== n.id))}
@@ -3229,54 +3276,4 @@ export default function App() {
                     color={COLORS.mustard}
                     fill={n <= feedbackRating ? COLORS.mustard : "none"}
                   />
-                </button>
-              ))}
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button
-                onClick={() => setShowFeedback(false)}
-                style={{
-                  flex: 1,
-                  background: "transparent",
-                  border: `1px solid ${COLORS.border}`,
-                  color: COLORS.gray,
-                  borderRadius: 6,
-                  padding: "9px 0",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: "pointer",
-                }}
-              >
-                Skip
-              </button>
-              <button
-                onClick={submitFeedback}
-                disabled={feedbackRating === 0 || feedbackSubmitting}
-                style={{
-                  flex: 1,
-                  background: COLORS.blue,
-                  border: "none",
-                  color: "#fff",
-                  borderRadius: 6,
-                  padding: "9px 0",
-                  fontSize: 13,
-                  fontWeight: 700,
-                  cursor: feedbackRating === 0 ? "default" : "pointer",
-                  opacity: feedbackRating === 0 ? 0.5 : 1,
-                }}
-              >
-                {feedbackSubmitting ? "Sending…" : "Submit"}
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
-
-      <style>{`
-        .spin { animation: qwetu-spin 1s linear infinite; }
-        @keyframes qwetu-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        @keyframes qwetu-bounce { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; } 40% { transform: scale(1); opacity: 1; } }
-      `}</style>
-    </div>
-  );
-}
+          
