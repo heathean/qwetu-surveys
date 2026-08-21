@@ -40,6 +40,7 @@ import {
   CalendarClock,
   Clock,
   Eye,
+  Bell,
 } from "lucide-react";
 import QRCode from "qrcode";
 import { supabase } from "./supabaseClient";
@@ -1018,7 +1019,7 @@ function ListingCard({ listing, rightAction, rotateSeed, distance, onReport, isF
     const key = `qwetu_viewed_${listing.id}`;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
-    supabase.rpc("increment_view_count", { p_listing_id: listing.id }).then(() => {}).catch(() => {});
+    supabase.rpc("increment_view_count", { p_listing_id: listing.id }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackView, listing.id]);
 
@@ -1156,6 +1157,28 @@ function ListingCard({ listing, rightAction, rotateSeed, distance, onReport, isF
       ) : null}
 
       <AmenityTags amenities={listing.amenities} />
+
+      {(listing.viewing_slots || []).filter((s) => !s.taken).length > 0 ? (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "flex-start",
+            gap: 5,
+            fontSize: 11,
+            color: COLORS.blue,
+            fontWeight: 600,
+            marginTop: 10,
+          }}
+        >
+          <CalendarClock size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>
+            Viewing available: {listing.viewing_slots.filter((s) => !s.taken).map((s) => s.label).slice(0, 2).join(", ")}
+            {listing.viewing_slots.filter((s) => !s.taken).length > 2
+              ? ` +${listing.viewing_slots.filter((s) => !s.taken).length - 2} more`
+              : ""}
+          </span>
+        </div>
+      ) : null}
 
       {landlordBio ? (
         <div
@@ -1393,6 +1416,9 @@ export default function App() {
   const [landlordBio, setLandlordBio] = useState("");
   const [landlordBioSaved, setLandlordBioSaved] = useState(false);
   const [landlordBios, setLandlordBios] = useState({});
+  const [editingProfile, setEditingProfile] = useState(false);
+
+  const [interestNotifications, setInterestNotifications] = useState([]);
 
   const [nearMeOn, setNearMeOn] = useState(false);
   const [nearMeRadius, setNearMeRadius] = useState(5);
@@ -1477,6 +1503,40 @@ export default function App() {
     };
   }, [loadListings]);
 
+  // Keep a live snapshot of listings for the notification listener below,
+  // without needing to resubscribe its realtime channel every time
+  // listings change.
+  const listingsRef = React.useRef(listings);
+  useEffect(() => {
+    listingsRef.current = listings;
+  }, [listings]);
+
+  // Pop a notification on the landlord's dashboard the moment a hunter
+  // expresses interest in one of their own rooms.
+  useEffect(() => {
+    if (!user) return;
+    const channel = supabase
+      .channel(`interest-alerts-${user.id}`)
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "interests" }, (payload) => {
+        const row = payload.new;
+        const listing = listingsRef.current.find((l) => l.id === row.listing_id);
+        if (listing && listing.landlord_id === user.id) {
+          const noteId = uid();
+          setInterestNotifications((prev) => [
+            ...prev,
+            { id: noteId, hunterName: row.hunter_name, roomLabel: listing.room_label, buildingName: listing.building_name },
+          ]);
+          setTimeout(() => {
+            setInterestNotifications((prev) => prev.filter((n) => n.id !== noteId));
+          }, 8000);
+        }
+      })
+      .subscribe();
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user]);
+
   // Auth session — keeps landlords signed in across visits, and separates
   // each landlord's listings properly (fixes name/phone collisions).
   useEffect(() => {
@@ -1500,23 +1560,44 @@ export default function App() {
     }
   }, [user, profile.phone, loadListings]);
 
-  // Load this landlord's own bio ("market yourself") when they sign in.
+  // Load this landlord's own profile (name, phone, bio) when they sign in —
+  // stored on their account, so it's remembered without asking again.
   useEffect(() => {
     if (user) {
       supabase
         .from("landlord_profiles")
-        .select("bio")
+        .select("name, phone, bio")
         .eq("id", user.id)
         .maybeSingle()
-        .then(({ data }) => setLandlordBio(data?.bio || ""));
+        .then(({ data }) => {
+          setLandlordBio(data?.bio || "");
+          if (data?.name && data?.phone) {
+            setProfile({ name: data.name, phone: data.phone });
+            setEditingProfile(false);
+          } else {
+            setEditingProfile(true);
+          }
+        });
     } else {
       setLandlordBio("");
     }
   }, [user]);
 
-  const saveLandlordBio = async () => {
+  const saveLandlordProfile = async () => {
     if (!user) return;
-    await supabase.from("landlord_profiles").upsert({ id: user.id, bio: landlordBio, updated_at: new Date().toISOString() });
+    if (!profile.name.trim() || !profile.phone.trim()) {
+      setError("Enter your name and phone number.");
+      return;
+    }
+    await supabase.from("landlord_profiles").upsert({
+      id: user.id,
+      name: profile.name,
+      phone: profile.phone,
+      bio: landlordBio,
+      updated_at: new Date().toISOString(),
+    });
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+    setEditingProfile(false);
     setLandlordBioSaved(true);
     setTimeout(() => setLandlordBioSaved(false), 2000);
     loadListings();
@@ -2264,6 +2345,40 @@ export default function App() {
           <LoginForm t={t} onAuthed={() => {}} />
         ) : (
           <div>
+            {interestNotifications.length > 0 ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 16 }}>
+                {interestNotifications.map((n) => (
+                  <div
+                    key={n.id}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 10,
+                      background: COLORS.mustard,
+                      color: COLORS.blueDark,
+                      borderRadius: 8,
+                      padding: "10px 14px",
+                      fontSize: 13,
+                      fontWeight: 700,
+                      boxShadow: "0 2px 8px rgba(0,0,0,0.12)",
+                    }}
+                  >
+                    <Bell size={16} />
+                    <span>
+                      {n.hunterName} is interested in your {n.roomLabel} at {n.buildingName}!
+                    </span>
+                    <button
+                      onClick={() => setInterestNotifications((prev) => prev.filter((x) => x.id !== n.id))}
+                      style={{ marginLeft: "auto", background: "none", border: "none", color: COLORS.blueDark, cursor: "pointer" }}
+                      aria-label="Dismiss"
+                    >
+                      <X size={15} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
             <div
               style={{
                 display: "flex",
@@ -2298,52 +2413,129 @@ export default function App() {
               </button>
             </div>
 
-            <div style={{ background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: 8, padding: 16, marginBottom: 24 }}>
-              <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>Your landlord details</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
-                <TextField label="Your name" value={profile.name} onChange={(v) => updateProfile({ ...profile, name: v })} placeholder="e.g. Mama Njeri" />
-                <TextField label="Phone number" value={profile.phone} onChange={(v) => updateProfile({ ...profile, phone: v })} placeholder="07XX XXX XXX" />
-              </div>
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontSize: 12, color: COLORS.gray, fontWeight: 600, marginBottom: 6 }}>
-                  Market yourself — shown on every room you post
-                </div>
-                <textarea
-                  value={landlordBio}
-                  onChange={(e) => setLandlordBio(e.target.value)}
-                  placeholder="e.g. Been renting out clean, secure rooms in Kilimani for 6 years. Fast response, fair deposit terms."
-                  maxLength={220}
-                  rows={3}
-                  style={{
-                    width: "100%",
-                    border: `1px solid ${COLORS.border}`,
-                    borderRadius: 6,
-                    padding: "9px 10px",
-                    fontSize: 13,
-                    fontFamily: "inherit",
-                    resize: "vertical",
-                  }}
-                />
-                <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+            <div
+              style={{
+                background: `linear-gradient(135deg, ${COLORS.blue}, ${COLORS.blueDark})`,
+                borderRadius: 10,
+                padding: 18,
+                marginBottom: 24,
+                color: "#fff",
+              }}
+            >
+              {editingProfile ? (
+                <div>
+                  <div style={{ fontWeight: 800, fontSize: 14, marginBottom: 10 }}>Set up your profile</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, fontWeight: 600 }}>
+                      Your name
+                      <input
+                        value={profile.name}
+                        onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+                        placeholder="e.g. Mama Njeri"
+                        style={{ border: "none", borderRadius: 6, padding: "9px 10px", fontSize: 14, color: COLORS.ink }}
+                      />
+                    </label>
+                    <label style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 12, fontWeight: 600 }}>
+                      Phone number
+                      <input
+                        value={profile.phone}
+                        onChange={(e) => setProfile({ ...profile, phone: e.target.value })}
+                        placeholder="07XX XXX XXX"
+                        style={{ border: "none", borderRadius: 6, padding: "9px 10px", fontSize: 14, color: COLORS.ink }}
+                      />
+                    </label>
+                  </div>
+                  <div style={{ marginTop: 14 }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>
+                      Market yourself — shown on every room you post
+                    </div>
+                    <textarea
+                      value={landlordBio}
+                      onChange={(e) => setLandlordBio(e.target.value)}
+                      placeholder="e.g. Been renting out clean, secure rooms in Kilimani for 6 years. Fast response, fair deposit terms."
+                      maxLength={220}
+                      rows={3}
+                      style={{
+                        width: "100%",
+                        border: "none",
+                        borderRadius: 6,
+                        padding: "9px 10px",
+                        fontSize: 13,
+                        fontFamily: "inherit",
+                        resize: "vertical",
+                        color: COLORS.ink,
+                      }}
+                    />
+                  </div>
+                  {error ? <div style={{ color: "#FFD3C7", fontSize: 12, marginTop: 8 }}>{error}</div> : null}
                   <button
                     type="button"
-                    onClick={saveLandlordBio}
+                    onClick={saveLandlordProfile}
                     style={{
-                      background: COLORS.blue,
-                      color: "#fff",
+                      marginTop: 12,
+                      background: COLORS.mustard,
+                      color: COLORS.blueDark,
                       border: "none",
                       borderRadius: 6,
-                      padding: "7px 14px",
+                      padding: "8px 16px",
                       fontSize: 12,
-                      fontWeight: 700,
+                      fontWeight: 800,
                       cursor: "pointer",
                     }}
                   >
-                    Save
+                    Save profile
                   </button>
-                  {landlordBioSaved ? <span style={{ color: COLORS.green, fontSize: 12, fontWeight: 700 }}>Saved ✓</span> : null}
                 </div>
-              </div>
+              ) : (
+                <div style={{ display: "flex", alignItems: "flex-start", gap: 14 }}>
+                  <div
+                    style={{
+                      width: 52,
+                      height: 52,
+                      borderRadius: "50%",
+                      background: COLORS.mustard,
+                      color: COLORS.blueDark,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontWeight: 900,
+                      fontSize: 20,
+                      flexShrink: 0,
+                    }}
+                  >
+                    {(profile.name || "?").trim().charAt(0).toUpperCase()}
+                  </div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontWeight: 800, fontSize: 16 }}>{profile.name}</div>
+                    <div style={{ fontSize: 12, color: "#CFE0F0", marginTop: 2 }}>{profile.phone}</div>
+                    {landlordBio ? (
+                      <div style={{ fontSize: 12, color: "#EAF1F8", marginTop: 8, fontStyle: "italic", lineHeight: 1.5 }}>
+                        "{landlordBio}"
+                      </div>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setEditingProfile(true)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 4,
+                      background: "rgba(255,255,255,0.15)",
+                      border: "none",
+                      color: "#fff",
+                      borderRadius: 6,
+                      padding: "6px 10px",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      flexShrink: 0,
+                    }}
+                  >
+                    Edit
+                  </button>
+                </div>
+              )}
             </div>
 
             <form
