@@ -1019,7 +1019,10 @@ function ListingCard({ listing, rightAction, rotateSeed, distance, onReport, isF
     const key = `qwetu_viewed_${listing.id}`;
     if (sessionStorage.getItem(key)) return;
     sessionStorage.setItem(key, "1");
-    supabase.rpc("increment_view_count", { p_listing_id: listing.id }).catch(() => {});
+    supabase.rpc("increment_view_count", { p_listing_id: listing.id }).then(
+      () => {},
+      () => {}
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trackView, listing.id]);
 
@@ -3273,7 +3276,4 @@ export default function App() {
         .spin { animation: qwetu-spin 1s linear infinite; }
         @keyframes qwetu-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
         @keyframes qwetu-bounce { 0%, 80%, 100% { transform: scale(0.6); opacity: 0.5; } 40% { transform: scale(1); opacity: 1; } }
-      `}</style>
-    </div>
-  );
-}
+      `}
